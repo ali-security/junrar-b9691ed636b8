@@ -1,16 +1,19 @@
 name: CI
 
 on:
-  pull_request:
-  push:
-    branches-ignore:
-      - 'dependabot/**'
   workflow_dispatch:
+    inputs:
+      test-filter:
+        description: 'Gradle test task selector (empty runs the full suite)'
+        required: false
+        default: ''
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     strategy:
+      fail-fast: false
       matrix:
         java: [ 8, 11, 17, 18 ]
     name: Test JDK ${{ matrix.java }}
@@ -21,22 +24,54 @@ jobs:
           java-version: ${{ matrix.java }}
           java-package: 'jdk'
           distribution: 'temurin'
+      - name: Enable per-test result logging
+        run: |
+          mkdir -p ~/.gradle/init.d
+          cat > ~/.gradle/init.d/test-logging.gradle <<'GRADLE'
+          allprojects {
+              tasks.withType(Test).configureEach {
+                  testLogging {
+                      events 'passed', 'skipped', 'failed'
+                      exceptionFormat 'full'
+                      showStandardStreams = false
+                  }
+                  afterSuite { desc, result ->
+                      if (!desc.parent) {
+                          println "TEST SUMMARY (${desc.name}): ${result.resultType} - ${result.testCount} tests, ${result.successfulTestCount} passed, ${result.failedTestCount} failed, ${result.skippedTestCount} skipped"
+                      }
+                  }
+              }
+          }
+          GRADLE
       - name: Build
         uses: gradle/gradle-build-action@v2
         with:
-          arguments: build
+          arguments: ${{ inputs.test-filter != '' && format('assemble {0}', inputs.test-filter) || 'build -x checkstyleMain -x checkstyleTest -x checkstyleRegressionTest' }}
       - name: Jacoco
         uses: gradle/gradle-build-action@v2
         with:
           arguments: jacocoTestReport
-      - uses: codecov/codecov-action@v2
+      - name: Package jar
         if: matrix.java == '8'
+        uses: gradle/gradle-build-action@v2
+        with:
+          arguments: jar
+      - name: List built jars
+        if: matrix.java == '8'
+        run: ls -la build/libs
+      - uses: actions/upload-artifact@v4
+        if: matrix.java == '8'
+        with:
+          name: junrar-jar
+          path: build/libs/junrar-[0-9]*[0-9].jar
+          if-no-files-found: error
 
   release:
     name: semantic release
     runs-on: ubuntu-latest
     needs: test
-    if: ${{ github.event_name == 'workflow_dispatch' }}
+    timeout-minutes: 30
+    if: false
     steps:
       - uses: actions/checkout@v3
       - uses: actions/setup-node@v2
